@@ -1,27 +1,54 @@
-import json
 import os
+import json
 import torch
 import random
 import xml.etree.ElementTree as ET
 import torchvision.transforms.functional as FT
+
+
+def load_maps(path):
+    with open(file=path, mode='r') as f:
+        label_map, rev_label_map, label_color_map = json.load(f)
+
+    rev_label_map = {int(k): v for k, v in rev_label_map.items()}
+    return label_map, rev_label_map, label_color_map
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Label map
 voc_labels = ('aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable',
               'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor')
-label_map = {k: v + 1 for v, k in enumerate(voc_labels)}
-label_map['background'] = 0
-rev_label_map = {v: k for k, v in label_map.items()}  # Inverse mapping
+pascal_voc_label_map = {k: v + 1 for v, k in enumerate(voc_labels)}
+pascal_voc_label_map['background'] = 0
+rev_pascal_voc_label_map = {v: k for k, v in pascal_voc_label_map.items()}  # Inverse mapping
 
 # Color map for bounding boxes of detected objects from https://sashat.me/2017/01/11/list-of-20-simple-distinct-colors/
 distinct_colors = ['#e6194b', '#3cb44b', '#ffe119', '#0082c8', '#f58231', '#911eb4', '#46f0f0', '#f032e6',
                    '#d2f53c', '#fabebe', '#008080', '#000080', '#aa6e28', '#fffac8', '#800000', '#aaffc3', '#808000',
                    '#ffd8b1', '#e6beff', '#808080', '#FFFFFF']
-label_color_map = {k: distinct_colors[i] for i, k in enumerate(label_map.keys())}
+pascal_voc_label_color_map = {k: distinct_colors[i] for i, k in enumerate(pascal_voc_label_map.keys())}
 
 
-def parse_annotation(annotation_path):
+def get_labels_maps(paths):
+    labels = set()
+
+    for path in paths:
+        tree = ET.parse(path)
+        root = tree.getroot()
+
+        for object in root.iter('object'):
+            label = object.find('name').text.lower().strip()
+            labels.add(label)
+
+    labels = sorted(list(labels))
+    label_map = {k: v + 1 for v, k in enumerate(labels)}
+    label_map['background'] = 0
+    rev_label_map = {v: k for k, v in label_map.items()} 
+    label_color_map = {k: distinct_colors[i] for i, k in enumerate(label_map.keys())}
+    return label_map, rev_label_map, label_color_map
+
+
+def parse_annotation(annotation_path, label_map=pascal_voc_label_map):
     tree = ET.parse(annotation_path)
     root = tree.getroot()
 
@@ -49,6 +76,78 @@ def parse_annotation(annotation_path):
     return {'boxes': boxes, 'labels': labels, 'difficulties': difficulties}
 
 
+def create_jsons_for_roboflow_pascal_voc(roboflow_path, output_folder):
+    """
+    Create lists of images, the bounding boxes and labels of the objects in these images, and save these to file.
+
+    :param roboflow_path: path to the roboflow dataset folder
+    :param output_folder: folder where the JSONs must be saved
+    """
+    os.makedirs(output_folder, exist_ok=True)
+    roboflow_path = os.path.abspath(roboflow_path)
+
+    train_images = list()
+    train_objects = list()
+    n_objects = 0
+
+    # Training data
+    train_path = os.path.join(roboflow_path, 'train')
+    ids = [f[:-4] for f in os.listdir(train_path) if f.endswith('.jpg')]
+    xmls = [os.path.join(train_path, id+'.xml') for id in ids]
+    label_map, rev_label_map, label_color_map = get_labels_maps(xmls)
+
+    for id in ids:
+        # Parse annotation's XML file
+        objects = parse_annotation(os.path.join(train_path, id + '.xml'), label_map)
+        if len(objects['boxes']) == 0:
+            continue
+        n_objects += len(objects)
+        train_objects.append(objects)
+        train_images.append(os.path.join(train_path, id + '.jpg'))
+
+    assert len(train_objects) == len(train_images)
+
+    # Save to file
+    with open(os.path.join(output_folder, 'TRAIN_images.json'), 'w') as j:
+        json.dump(train_images, j)
+    with open(os.path.join(output_folder, 'TRAIN_objects.json'), 'w') as j:
+        json.dump(train_objects, j)
+    with open(os.path.join(output_folder, 'label_maps.json'), 'w') as j:
+        json.dump([label_map, rev_label_map, label_color_map], j)  # save label map too
+
+    print('\nThere are %d training images containing a total of %d objects. Files have been saved to %s.' % (
+        len(train_images), n_objects, os.path.abspath(output_folder)))
+
+    # Test data
+    test_images = list()
+    test_objects = list()
+    n_objects = 0
+
+    # Find IDs of images in the test data
+    test_path = os.path.join(roboflow_path, 'test')
+    ids = [f[:-4] for f in os.listdir(test_path) if f.endswith('.jpg')]
+
+    for id in ids:
+        # Parse annotation's XML file
+        objects = parse_annotation(os.path.join(test_path, id + '.xml'), label_map)
+        if len(objects) == 0:
+            continue
+        test_objects.append(objects)
+        n_objects += len(objects)
+        test_images.append(os.path.join(test_path, id + '.jpg'))
+
+    assert len(test_objects) == len(test_images)
+
+    # Save to file
+    with open(os.path.join(output_folder, 'TEST_images.json'), 'w') as j:
+        json.dump(test_images, j)
+    with open(os.path.join(output_folder, 'TEST_objects.json'), 'w') as j:
+        json.dump(test_objects, j)
+
+    print('\nThere are %d test images containing a total of %d objects. Files have been saved to %s.' % (
+        len(test_images), n_objects, os.path.abspath(output_folder)))
+
+
 def create_data_lists(voc07_path, voc12_path, output_folder):
     """
     Create lists of images, the bounding boxes and labels of the objects in these images, and save these to file.
@@ -57,6 +156,8 @@ def create_data_lists(voc07_path, voc12_path, output_folder):
     :param voc12_path: path to the 'VOC2012' folder
     :param output_folder: folder where the JSONs must be saved
     """
+    os.makedirs(output_folder, exist_ok=True)
+
     voc07_path = os.path.abspath(voc07_path)
     voc12_path = os.path.abspath(voc12_path)
 
@@ -73,7 +174,7 @@ def create_data_lists(voc07_path, voc12_path, output_folder):
 
         for id in ids:
             # Parse annotation's XML file
-            objects = parse_annotation(os.path.join(path, 'Annotations', id + '.xml'))
+            objects = parse_annotation(os.path.join(path, 'Annotations', id + '.xml'), pascal_voc_label_map)
             if len(objects['boxes']) == 0:
                 continue
             n_objects += len(objects)
@@ -88,7 +189,7 @@ def create_data_lists(voc07_path, voc12_path, output_folder):
     with open(os.path.join(output_folder, 'TRAIN_objects.json'), 'w') as j:
         json.dump(train_objects, j)
     with open(os.path.join(output_folder, 'label_map.json'), 'w') as j:
-        json.dump(label_map, j)  # save label map too
+        json.dump([pascal_voc_label_map, rev_pascal_voc_label_map, pascal_voc_label_color_map], j)  # save label map too
 
     print('\nThere are %d training images containing a total of %d objects. Files have been saved to %s.' % (
         len(train_images), n_objects, os.path.abspath(output_folder)))
@@ -104,7 +205,7 @@ def create_data_lists(voc07_path, voc12_path, output_folder):
 
     for id in ids:
         # Parse annotation's XML file
-        objects = parse_annotation(os.path.join(voc07_path, 'Annotations', id + '.xml'))
+        objects = parse_annotation(os.path.join(voc07_path, 'Annotations', id + '.xml'), pascal_voc_label_map)
         if len(objects) == 0:
             continue
         test_objects.append(objects)
@@ -142,7 +243,7 @@ def decimate(tensor, m):
     return tensor
 
 
-def calculate_mAP(det_boxes, det_labels, det_scores, true_boxes, true_labels, true_difficulties):
+def calculate_mAP(det_boxes, det_labels, det_scores, true_boxes, true_labels, true_difficulties, label_map=pascal_voc_label_map, rev_label_map=rev_pascal_voc_label_map):
     """
     Calculate the Mean Average Precision (mAP) of detected objects.
 
@@ -468,8 +569,8 @@ def random_crop(image, boxes, labels, difficulties):
             crop = torch.FloatTensor([left, top, right, bottom])  # (4)
 
             # Calculate Jaccard overlap between the crop and the bounding boxes
-            overlap = find_jaccard_overlap(crop.unsqueeze(0),
-                                           boxes)  # (1, n_objects), n_objects is the no. of objects in this image
+            overlap = find_jaccard_overlap(crop.unsqueeze(0), # (1, 4)
+                                           boxes)  # (n_objects, 4), n_objects is the no. of objects in this image
             overlap = overlap.squeeze(0)  # (n_objects)
 
             # If not a single bounding box has a Jaccard overlap of greater than the minimum, try again
@@ -666,7 +767,7 @@ def accuracy(scores, targets, k):
     return correct_total.item() * (100.0 / batch_size)
 
 
-def save_checkpoint(epoch, model, optimizer):
+def save_checkpoint(epoch, model, optimizer, filename='checkpoint_ssd300.pkl'):
     """
     Save model checkpoint.
 
@@ -677,7 +778,6 @@ def save_checkpoint(epoch, model, optimizer):
     state = {'epoch': epoch,
              'model': model,
              'optimizer': optimizer}
-    filename = 'checkpoint_ssd300.pth.tar'
     torch.save(state, filename)
 
 

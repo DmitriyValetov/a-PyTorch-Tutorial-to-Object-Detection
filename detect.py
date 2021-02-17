@@ -1,17 +1,12 @@
+import os
+import torch
 from torchvision import transforms
-from utils import *
+from utils import load_maps
 from PIL import Image, ImageDraw, ImageFont
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Load model checkpoint
-checkpoint = 'checkpoint_ssd300.pth.tar'
-checkpoint = torch.load(checkpoint)
-start_epoch = checkpoint['epoch'] + 1
-print('\nLoaded checkpoint from epoch %d.\n' % start_epoch)
-model = checkpoint['model']
-model = model.to(device)
-model.eval()
+
 
 # Transforms
 resize = transforms.Resize((300, 300))
@@ -20,7 +15,7 @@ normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225])
 
 
-def detect(original_image, min_score, max_overlap, top_k, suppress=None):
+def detect(model, original_image, min_score, max_overlap, top_k, rev_label_map, label_color_map, suppress=None):
     """
     Detect objects in an image with a trained SSD300, and visualize the results.
 
@@ -64,7 +59,7 @@ def detect(original_image, min_score, max_overlap, top_k, suppress=None):
     # Annotate
     annotated_image = original_image
     draw = ImageDraw.Draw(annotated_image)
-    font = ImageFont.truetype("./calibril.ttf", 15)
+    # font = ImageFont.truetype("./calibril.ttf", 15)
 
     # Suppress specific classes, if needed
     for i in range(det_boxes.size(0)):
@@ -83,20 +78,35 @@ def detect(original_image, min_score, max_overlap, top_k, suppress=None):
         #     det_labels[i]])  # a fourth rectangle at an offset of 1 pixel to increase line thickness
 
         # Text
-        text_size = font.getsize(det_labels[i].upper())
+        text_size = [15, 15] # font.getsize(det_labels[i].upper())
         text_location = [box_location[0] + 2., box_location[1] - text_size[1]]
         textbox_location = [box_location[0], box_location[1] - text_size[1], box_location[0] + text_size[0] + 4.,
                             box_location[1]]
         draw.rectangle(xy=textbox_location, fill=label_color_map[det_labels[i]])
         draw.text(xy=text_location, text=det_labels[i].upper(), fill='white',
-                  font=font)
+                #   font=font
+                  )
     del draw
 
     return annotated_image
 
 
 if __name__ == '__main__':
-    img_path = '/media/ssd/ssd data/VOC2007/JPEGImages/000001.jpg'
+    img_path = '../test_images/plane.jpg'
     original_image = Image.open(img_path, mode='r')
     original_image = original_image.convert('RGB')
-    detect(original_image, min_score=0.2, max_overlap=0.5, top_k=200).show()
+
+    # Load model checkpoint
+    data_path = '../pascal_voc_dumps'
+    label_map, rev_label_map, label_color_map = load_maps(os.path.join(data_path, 'label_map.json'))
+
+
+    checkpoint = os.path.join(data_path, 'checkpoint_ssd300.pkl')
+    checkpoint = torch.load(checkpoint)
+    start_epoch = checkpoint['epoch'] + 1
+    print('\nLoaded checkpoint from epoch %d.\n' % start_epoch)
+    model = checkpoint['model']
+    model = model.to(device)
+    model.eval()
+
+    detect(model, original_image, min_score=0.2, max_overlap=0.5, top_k=200, rev_label_map=rev_label_map, label_color_map=label_color_map).show()
