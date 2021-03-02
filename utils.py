@@ -2,6 +2,7 @@ import os
 import json
 import torch
 import random
+import numpy as np
 import xml.etree.ElementTree as ET
 import torchvision.transforms.functional as FT
 
@@ -13,7 +14,6 @@ def load_maps(path):
     rev_label_map = {int(k): v for k, v in rev_label_map.items()}
     return label_map, rev_label_map, label_color_map
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Label map
 voc_labels = ('aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable',
@@ -112,7 +112,7 @@ def create_jsons_for_roboflow_pascal_voc(roboflow_path, output_folder):
         json.dump(train_images, j)
     with open(os.path.join(output_folder, 'TRAIN_objects.json'), 'w') as j:
         json.dump(train_objects, j)
-    with open(os.path.join(output_folder, 'label_maps.json'), 'w') as j:
+    with open(os.path.join(output_folder, 'label_map.json'), 'w') as j:
         json.dump([label_map, rev_label_map, label_color_map], j)  # save label map too
 
     print('\nThere are %d training images containing a total of %d objects. Files have been saved to %s.' % (
@@ -243,7 +243,30 @@ def decimate(tensor, m):
     return tensor
 
 
-def calculate_mAP(det_boxes, det_labels, det_scores, true_boxes, true_labels, true_difficulties, label_map=pascal_voc_label_map, rev_label_map=rev_pascal_voc_label_map):
+def calculate_mmAP(det_boxes, det_labels, det_scores, true_boxes, true_labels, true_difficulties, label_map=pascal_voc_label_map, rev_label_map=rev_pascal_voc_label_map, device='cpu'):
+    APs = []
+    mAPs = []
+    for iou_min in np.linspace(0.5, 0.85, 11):
+        average_precisions, mean_average_precision = calculate_mAP(
+            det_boxes, 
+            det_labels, 
+            det_scores, 
+            true_boxes, 
+            true_labels, 
+            true_difficulties, 
+            label_map, 
+            rev_label_map, 
+            iou_min,
+            device=device
+        )
+        APs.append(average_precisions)
+        mAPs.append(mean_average_precision)
+
+    APs = {k: np.mean([d[k] for d in APs]) for k in APs[0].keys()}
+    return APs, np.mean(mAPs)
+
+
+def calculate_mAP(det_boxes, det_labels, det_scores, true_boxes, true_labels, true_difficulties, label_map=pascal_voc_label_map, rev_label_map=rev_pascal_voc_label_map, iou_min=0.5, device='cpu'):
     """
     Calculate the Mean Average Precision (mAP) of detected objects.
 
@@ -337,7 +360,7 @@ def calculate_mAP(det_boxes, det_labels, det_scores, true_boxes, true_labels, tr
             # We need 'original_ind' to update 'true_class_boxes_detected'
 
             # If the maximum overlap is greater than the threshold of 0.5, it's a match
-            if max_overlap.item() > 0.5:
+            if max_overlap.item() > iou_min:
                 # If the object it matched with is 'difficult', ignore it
                 if object_difficulties[ind] == 0:
                     # If this object has already not been detected, it's a true positive
